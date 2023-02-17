@@ -194,6 +194,8 @@ type Server struct {
 	delpeer                 chan peerDrop
 	checkpointPostHandshake chan *conn
 	checkpointAddPeer       chan *conn
+	allowStaticInbound      chan enode.ID
+	removeStaticInbound     chan enode.ID
 
 	// State of run loop and listenLoop.
 	inboundHistory expHeap
@@ -214,6 +216,7 @@ const (
 	staticDialedConn
 	inboundConn
 	trustedConn
+	staticInboundConn
 )
 
 // conn wraps a network connection with information gathered
@@ -631,6 +634,8 @@ func (srv *Server) setupDialScheduler() {
 		config.dialer = tcpDialer{&net.Dialer{Timeout: defaultDialTimeout}}
 	}
 	srv.dialsched = newDialScheduler(config, srv.discmix, srv.SetupConn)
+	srv.allowStaticInbound = srv.dialsched.allowStaticInbound
+	srv.removeStaticInbound = srv.dialsched.removeStaticInbound
 	for _, n := range srv.StaticNodes {
 		srv.dialsched.addStatic(n)
 	}
@@ -699,9 +704,10 @@ func (srv *Server) run() {
 	defer srv.dialsched.stop()
 
 	var (
-		peers        = make(map[enode.ID]*Peer)
-		inboundCount = 0
-		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		peers         = make(map[enode.ID]*Peer)
+		inboundCount  = 0
+		trusted       = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		staticInbound = make(map[enode.ID]struct{})
 	)
 	// Put trusted nodes into a map to speed up checks.
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
@@ -746,6 +752,12 @@ running:
 				// Ensure that the trusted flag is set before checking against MaxPeers.
 				c.flags |= trustedConn
 			}
+			if c.is(inboundConn) && !c.is(trustedConn) {
+				if _, isStatic := staticInbound[c.node.ID()]; isStatic {
+					c.flags |= staticInboundConn
+				}
+			}
+
 			// TODO: track in-progress inbound node IDs (pre-Peer) to avoid dialing them.
 			c.cont <- srv.postHandshakeChecks(peers, inboundCount, c)
 
@@ -774,6 +786,13 @@ running:
 			if pd.Inbound() {
 				inboundCount--
 			}
+
+		case staticPeer := <-srv.allowStaticInbound:
+			staticInbound[staticPeer] = struct{}{}
+
+		case staticPeer := <-srv.removeStaticInbound:
+			delete(staticInbound, staticPeer)
+
 		}
 	}
 
@@ -804,8 +823,8 @@ func (srv *Server) postHandshakeChecks(peers map[enode.ID]*Peer, inboundCount in
 	switch {
 	case !c.is(trustedConn) && len(peers) >= srv.MaxPeers:
 		return DiscTooManyPeers
-	case !c.is(trustedConn) && c.is(inboundConn) && inboundCount >= srv.maxInboundConns():
-		return DiscTooManyPeers
+	case !c.is(trustedConn) && !c.is(staticInboundConn) && c.is(inboundConn) && inboundCount >= srv.maxInboundConns():
+		return DiscTooManyPeers // TODO: new error message here to differentiate maxInboundPeers error from maxTotalPeers error
 	case peers[c.node.ID()] != nil:
 		return DiscAlreadyConnected
 	case c.node.ID() == srv.localnode.ID():

@@ -84,25 +84,26 @@ var (
 // dialer creates outbound connections and submits them into Server.
 // Two types of peer connections can be created:
 //
-//  - static dials are pre-configured connections. The dialer attempts
-//    keep these nodes connected at all times.
+//   - static dials are pre-configured connections. The dialer attempts
+//     keep these nodes connected at all times.
 //
-//  - dynamic dials are created from node discovery results. The dialer
-//    continuously reads candidate nodes from its input iterator and attempts
-//    to create peer connections to nodes arriving through the iterator.
-//
+//   - dynamic dials are created from node discovery results. The dialer
+//     continuously reads candidate nodes from its input iterator and attempts
+//     to create peer connections to nodes arriving through the iterator.
 type dialScheduler struct {
 	dialConfig
-	setupFunc   dialSetupFunc
-	wg          sync.WaitGroup
-	cancel      context.CancelFunc
-	ctx         context.Context
-	nodesIn     chan *enode.Node
-	doneCh      chan *dialTask
-	addStaticCh chan *enode.Node
-	remStaticCh chan *enode.Node
-	addPeerCh   chan *conn
-	remPeerCh   chan *conn
+	setupFunc           dialSetupFunc
+	wg                  sync.WaitGroup
+	cancel              context.CancelFunc
+	ctx                 context.Context
+	nodesIn             chan *enode.Node
+	doneCh              chan *dialTask
+	addStaticCh         chan *enode.Node
+	remStaticCh         chan *enode.Node
+	addPeerCh           chan *conn
+	remPeerCh           chan *conn
+	allowStaticInbound  chan enode.ID
+	removeStaticInbound chan enode.ID
 
 	// Everything below here belongs to loop and
 	// should only be accessed by code on the loop goroutine.
@@ -162,17 +163,19 @@ func (cfg dialConfig) withDefaults() dialConfig {
 
 func newDialScheduler(config dialConfig, it enode.Iterator, setupFunc dialSetupFunc) *dialScheduler {
 	d := &dialScheduler{
-		dialConfig:  config.withDefaults(),
-		setupFunc:   setupFunc,
-		dialing:     make(map[enode.ID]*dialTask),
-		static:      make(map[enode.ID]*dialTask),
-		peers:       make(map[enode.ID]struct{}),
-		doneCh:      make(chan *dialTask),
-		nodesIn:     make(chan *enode.Node),
-		addStaticCh: make(chan *enode.Node),
-		remStaticCh: make(chan *enode.Node),
-		addPeerCh:   make(chan *conn),
-		remPeerCh:   make(chan *conn),
+		dialConfig:          config.withDefaults(),
+		setupFunc:           setupFunc,
+		dialing:             make(map[enode.ID]*dialTask),
+		static:              make(map[enode.ID]*dialTask),
+		peers:               make(map[enode.ID]struct{}),
+		doneCh:              make(chan *dialTask),
+		nodesIn:             make(chan *enode.Node),
+		addStaticCh:         make(chan *enode.Node),
+		remStaticCh:         make(chan *enode.Node),
+		addPeerCh:           make(chan *conn),
+		remPeerCh:           make(chan *conn),
+		allowStaticInbound:  make(chan enode.ID),
+		removeStaticInbound: make(chan enode.ID),
 	}
 	d.lastStatsLog = d.clock.Now()
 	d.ctx, d.cancel = context.WithCancel(context.Background())
@@ -286,6 +289,7 @@ loop:
 			if d.checkDial(node) == nil {
 				d.addToStaticPool(task)
 			}
+			d.allowStaticInbound <- id
 
 		case node := <-d.remStaticCh:
 			id := node.ID()
@@ -297,6 +301,7 @@ loop:
 					d.removeFromStaticPool(task.staticPoolIndex)
 				}
 			}
+			d.removeStaticInbound <- id
 
 		case <-historyExp:
 			d.expireHistory()
