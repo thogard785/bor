@@ -267,6 +267,7 @@ loop:
 			task := d.static[id]
 			if task != nil && task.staticPoolIndex >= 0 {
 				d.removeFromStaticPool(task.staticPoolIndex)
+				d.removeStaticInbound <- id // no longer need to allow inbound from static peer
 			}
 			// TODO: cancel dials to connected peers
 
@@ -274,6 +275,11 @@ loop:
 			if c.is(dynDialedConn) || c.is(staticDialedConn) {
 				d.dialPeers--
 			}
+
+			if c.is(staticDialedConn) {
+				d.allowStaticInbound <- c.node.ID()
+			}
+			
 			delete(d.peers, c.node.ID())
 			d.updateStaticPool(c.node.ID())
 

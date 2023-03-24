@@ -792,7 +792,6 @@ running:
 
 		case staticPeer := <-srv.removeStaticInbound:
 			delete(staticInbound, staticPeer)
-
 		}
 	}
 
